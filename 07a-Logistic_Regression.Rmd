@@ -1,8 +1,3 @@
----
-title: "07a- Logistic Regression"
-output:
-  html_notebook: default
----
 
 ```{r eval=TRUE, echo=F, message=FALSE, warning=FALSE}
 library(knitr)
