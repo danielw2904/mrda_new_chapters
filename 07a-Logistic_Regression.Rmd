@@ -1,0 +1,417 @@
+---
+title: "07a- Logistic Regression"
+output:
+  html_notebook: default
+---
+
+```{r eval=TRUE, echo=F, message=FALSE, warning=FALSE}
+library(knitr)
+options(digits = 3)
+opts_chunk$set(tidy.opts=list(width.cutoff=75),tidy=FALSE, rownames.print = FALSE, rows.print = 10, echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Logistic regression
+
+## Motivation and intuition
+
+In the last chapter we saw how to predict continuous outcomes (sales, height, etc.) via linear regression models. Another interesting case is that of binary outcomes, i.e. when the variable we want to model can only take two values (yes or no, group 1 or group 2, dead or alive, etc.). To this end we would like to estimate how our predictor variables change the probability of a value being 0 or 1. In this case we can technically still use a linear model (e.g. OLS). However, its predictions will most likely not be particularly useful. To further expand on this, consider the following simulated data. $Y$ is the outcome we want to explain and $\mathbf{X}$ is our sole predictor. Looking at the scatter plot we can already see that $\mathbf{X}$ probably has an effect on $Y$. But how can we model it correctly?
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.cap="Simulated binary outcome data"}
+library(ggplot2)
+library(gridExtra)
+
+set.seed(1776) # AMERICA THE BEAUTIFUL
+
+beta.true <- as.matrix(c(0.6))
+N <- 100
+K <- nrow(beta.true)
+X <- matrix(runif(K * N, -8, 8), ncol = K)
+probs <- 1/(1 + exp(-X %*% beta.true))
+
+Y <- rbinom(n = N, size = 1, prob = probs)
+  
+lin.mod <- lm(Y ~ X)$coefficients
+
+lin.mod.pred <- cbind(1,X) %*% lin.mod
+
+ggplot(data = data.frame(Y = Y, X = X), aes(x = X, y = Y)) +
+  geom_point() + 
+  theme_bw()
+```
+
+Below are two attempts to model the data. The left assumes a linear probability model (calculated with the same methods that we used in the last chapter), while the right model is a __logistic regression model__. As you can see, the linear probability model produces probabilities that are above 1 and below 0, which are not valid probabilites, while the logistic model stays between 0 and 1. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align='center', fig.cap="The same binary data explained by two models; A linear probabilty model (on the left) and a logistic regression model (on the right)"}
+plot.bad <- ggplot(data = as.data.frame(cbind(Y, X)), aes(x = X, y = Y)) +
+  geom_point() + 
+  geom_line(data = data.frame(pred = lin.mod.pred[order(X)], X = X[order(X)]), aes(y = pred), lwd = 1.01, color = "firebrick") + 
+  theme_bw() +
+  ylim(-0.2, 1.2) 
+
+plot.cor <- ggplot(data = as.data.frame(cbind(Y, X)), aes(x = X, y = Y)) +
+  geom_point() + 
+  geom_line(data = data.frame(probs = probs[order(X)], X = X[order(X)]), aes(y = probs), lwd = 1.01, color = "firebrick") + 
+  theme_bw() +
+  ylim(-0.2, 1.2) +
+  theme(axis.title.y = element_blank())
+
+grid.arrange(plot.bad, plot.cor, ncol = 2)
+```
+
+A key insight at this point is that the connection between $\mathbf{X}$ and $Y$ is __non-linear__ in the logistic regression model. As we can see in the plot, the probability of success is most strongly affected by $\mathbf{X}$ around values of 0, while higher and lower values have a smaller marginal effect. This obviously also has consequences for the interpretation of the coefficients later on.  
+
+## Technical details of the model
+
+As the name suggests, the logistic function is an important component of the logistic regression model. It has the following form:
+
+$$
+f(\mathbf{X}) = \frac{1}{1 + e^{-\mathbf{X}}}
+$$
+This function transfroms all real numbers into the range between 0 and 1. We need this to model probabilities, as probabilities can only be between 0 and 1. 
+
+```{r, echo = FALSE}
+library(latex2exp)
+x <- seq(-10, 10, length.out = 1000)
+fx <- 1/(1+exp(-x))
+df <- data.frame(x = x, fx = fx)
+ggplot(df, aes(x = x, y = fx)) + 
+  geom_line()+
+  labs(y = TeX("$\\frac{1}{1+e^{-\\mathbf{X}}}$"), x = TeX("$\\mathbf{X}$"))+
+  theme(axis.title.y = element_text(angle = 0, vjust = 0.5)) + 
+  theme_bw()
+```
+
+
+
+The logistic function on its own is not very useful yet, as we want to be able to determine how predictors influence the probability of a value to be equal to 1. To this end we replace the $\mathbf{X}$ in the function above with our familiar linear specification, i.e.
+
+$$
+\mathbf{X} = \beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i}\\
+f(\mathbf{X}) = P(y_i = 1) = \frac{1}{1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}}
+$$
+Now we have a mathematical relationship between our predictor variables $(x_1, ..., x_m)$ and the probability of $y_i$ being equal to one. The last step is to estimate the parameters of this model $(\beta_0, \beta_1, ..., \beta_m)$ to determine the magnitude of the effects.  
+
+## Estimation in R
+
+We are now going to show how to perform logistic regression in R with data on extramarital affairs. Our goal is to explain the probability that someone cheats on their spouse. As explanatory variables sex, age, religiousness (1 = anti, 5 = very), self rating of marriage (1 = very unhappy, 5 = very happy), years of education and years married are used. Let's start by taking a look at the data. 
+
+```{r, message=FALSE, warning = FALSE}
+library(Ecdat)
+data("Fair") # needs library(Ecdat)
+head(Fair)
+```
+
+As a first step we need to transform the variable ```nbaffairs``` into a binary variable. 
+
+```{r, message = FALSE, warning = FALSE}
+# Recoding number of affairs to binary variable
+Fair$nbaffairs[Fair$nbaffairs > 0] <- 1
+```
+
+Now we can estimate the model with the ```glm(Y ~ X, family = binomial(link = "logit"))``` function. The syntax looks very similar to the familiar ```lm()``` function. The following code performs the estimation:
+
+```{r, message = FALSE, warning = FALSE}
+my_logit <- glm(nbaffairs ~ sex + age + religious + rate + ym + education, data = Fair, family = binomial(link = "logit"))
+```
+
+To investigate the model output, we use ```summary()```, as we did for linear models. 
+
+```{r, message = FALSE, warning = FALSE}
+summary(my_logit)
+```
+
+The coefficients of the model give the change in the [log odds](https://en.wikipedia.org/wiki/Odds#Statistical_usage) of the dependent variable due to a unit change in the regressor. This makes the exact interpretation of the coefficients difficult, but we can still interpret the signs and the p-values which will tell us if a variable has a significant positive or negative impact on the probability of the dependent variable being $1$. 
+
+We observe that one's sex does not have a significant impact on the probability of cheating. The older someone gets the less likely it is for them to cheat. More religious people are also less likely to cheat. Unsurprisingly being happier in one's marriage also decreases the likelihood of cheating. On the other hand, the longer someone is married the more likely they are to have cheated. Education does not have a significant impact.
+
+In order to get a rough idea about the magnitude of the effects we can calculate the partial effects at the mean of the data (that is the effect for the average observation). Alternatively, we can calculate the mean of the effects (that is the average of the individual effects). Both can be done with the ```logitmfx(...)``` function from the ```mfx``` package. If we set ```logitmfx(my_logit, data = my_data, atmean = FALSE)``` we calculate the latter. Setting ```atmean = TRUE``` will calculate the former. However, in general we are most interested in the sign and significance of the coefficient.
+
+```{r, message = FALSE, warning = FALSE}
+library(mfx)
+# Average partial effect
+logitmfx(my_logit, data = Fair, atmean = FALSE)
+```
+
+This now gives the average partial effects in percentage points. For example, the ```age``` result can be read as "on average, an additional year decreases the probability of cheating by 0.75%". Keep in mind that these are _average_ effects, as the effects are no longer linear, e.g. if you already have a 0% chance of cheating, you clearly can't decrease it any further. 
+ 
+### Model selection
+
+We will present two methods for model selection for logistic regression. The first is based on the _Akaike Information Criterium_ (AIC). It is reported with the summary output for logit models. The value of the AIC is __relative__, meaning that it has no interpretation by itself. However, it can be used to compare and select models. The model with the lowest AIC value is the one that should be chosen. Note that the AIC does not indicate how well the model fits the data, but is merely used to compare models. 
+
+For example, consider the following model, where we exclude the ```religious``` covariate. Seeing as it was able to contribute significantly to the explanatory power of the model, the AIC increases, indicating that the model including ```religious``` is better suited to explain the data.
+
+```{r, message = FALSE, warning = FALSE}
+# Take "religious" out. Compare AIC to full model!
+my_logit2 <- glm(nbaffairs ~ sex + age + rate + ym + education, data = Fair, family = binomial(link = "logit"))
+summary(my_logit2)
+```
+
+Measures for the absolute fit, comparable to the $R^2$ for linear regression, are also available. In fact multiple "Pseudo $R^2$s" have been developed. There are multiple packages that return the $R^2$ given a logit model (see ```rcompanion``` or ```pscl```). The calculation by hand is also fairly simple. This is left as an exercise for the reader.
+
+```{r echo = FALSE}
+logisticPseudoR2s <- function(LogModel) {
+  dev <- LogModel$deviance 
+  nullDev <- LogModel$null.deviance 
+  modelN <- length(LogModel$fitted.values)
+  R.l <-  1 -  dev / nullDev
+  R.cs <- 1- exp ( -(nullDev - dev) / modelN)
+  R.n <- R.cs / ( 1 - ( exp (-(nullDev / modelN))))
+  cat("Pseudo R^2 for logistic regression\n")
+  cat("Hosmer and Lemeshow R^2  ", round(R.l, 3), "\n")
+  cat("Cox and Snell R^2        ", round(R.cs, 3), "\n")
+  cat("Nagelkerke R^2           ", round(R.n, 3),    "\n")
+}
+
+```
+
+Below three versions of pseudo $R^2$s are reported. They indicate that our model does not describe our data well. So do not worry too much if the model indicates your partner has a high probability of cheating! As an exercise try to write a function that will return the following output:
+
+```{r, message = FALSE, warning = FALSE}
+logisticPseudoR2s(my_logit) 
+```
+
+### Predictions
+
+We can predict the probability given an observation using the ```predict(my_logit, newdata = ..., type = "response")``` function. Replace ```...``` with the observed $x_{i,j}$ values for which you would like to predict the outcome variable.
+
+
+```{r, message = FALSE, warning = FALSE}
+# Prediction for one observation
+predict(my_logit, newdata = data.frame(sex = "male", age = 30, ym = 2, religious = 2, education = 16, rate = 4), type = "response")
+```
+
+The prediction indicates that a 30 year old male who has been married for two years, has 16 years of education, highly rates his marriage and is not very religious has a probability of cheating of $\sim 21\%$ (Try predicting your own likelihood of cheating).   
+
+### Perfect Prediction Logit
+
+Perfect prediction occurs whenever a linear function of $X$ can perfectly separate the $1$s from the $0$s in the dependent variable. This is problematic when estimating a logit model as it will result in biased estimators (also check to p-values in the example!). R will return the following message if this occurs:
+
+```glm.fit: fitted probabilities numerically 0 or 1 occurred```
+
+Given this error, one should not use the output of the ```glm(...)``` function for the analysis. There are [various ways](https://stats.stackexchange.com/a/68917) to deal with this problem, one of which is to use Firth's bias-reduced penalized-likelihood logistic regression with the ```logistf(Y~X)``` function in the ```logistf``` package.  
+
+#### Example
+
+In this example data $Y = 0$ if $x_1 <0$ and $Y=1$ if $x_1>0$ and we thus have perfect prediction. As we can see the output of the regular logit model is not interpretable. The standard errors are huge compared to the coefficients and thus the p-values are $1$ despite $x_1$ being a predictor of $Y$. Thus we turn to the penalized-likelihood version. This model correctly indicates that $x_1$ is in fact a predictor for $Y$ as the coefficient is significant.  
+
+```{r, message = FALSE, warning = FALSE}
+Y <- c(0,0,0,0,1,1,1,1)
+X <- cbind(c(-1,-2,-3,-3,5,6,10,11),c(3,2,-1,-1,2,4,1,0))
+
+# Perfect prediction with regular logit
+summary(glm(Y~X, family=binomial(link="logit")))
+
+library(logistf)
+# Perfect prediction with penalized-likelihood logit
+summary(logistf(Y~X))
+```
+
+## Appendix
+
+### Maximum likelihood estimation
+
+For non-linear models we cannot turn to linear algebra to solve for the unknown parameters. However, we can use a statistical method called maximum likelihood estimation (MLE). Given observed data and an assumption about their distribution we can estimate for which parameter values the observed data is most likely to occur. We do this by calculating the joint log likelihood of the observations given _a_ choice of parameters (more on that below). Next, we change our parameter values a little bit and see if the joint log likelihood improved. We keep doing that until we cannot find better parameter values anymore (that is we have reached the maximum likelihood). In the following example we have a histogram of a dataset which we assume to be normally distributed. You can now try to find the best parameter values by changing the mean and the variance. Recall that the normal distribution is fully described by just those two parameters. In each step the log likelihood is automatically calculated. The maximum likelihood so far is shown as the high score and the line in the lower graph shows the development of the log likelihood for the past couple of tries.  
+
+<iframe src="http://localhost:3838/maximumLikelihood/" style="border: none; width: 800px; height: 900px"></iframe>
+
+### Estimation of the parameters $\beta_i$
+
+Let's return to the model to figure out how the parameters $\beta_i$ are estimated. In the data we observe the $y_i$, the outcome variable that is either $0$ or $1$, and the $x_{i,j}$, the predictors for each observation. In addition, by using the logit model we have assumed the following functional form.
+
+$$
+P(y_i = 1) = \frac{1}{1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}}
+$$
+
+So far we have looked at estimating the $\beta_i$ with R but have not discussed how that works. In contrast to linear models (e.g. OLS) we cannot rely on linear algebra to solve for $\beta_i$ since the function is now non-linear. Therefore, we turn to a methodology called _maximum likelihood estimation_. Basically, we try out different $\beta_i$ and choose the combination that best fits the observed data. In other words: choose the combination of $\beta_i$ that maximize the likelihood of observing the given dataset. For each individual we have information about the binary outcome and the predictors. For those whose outcome is $1$ we want to choose the $\beta_i$ such that our predicted probability of the outcome ($P(y_i = 1)$) is as close to $1$ as possible. At the same time, for those whose outcome is $0$ we would like the prediction ($P(y_i = 1)$) to be as close to $0$ as possible. Therefore, we "split" the sample into two groups (outcome $1$ and outcome $0$). For the first group each individual has the probability function shown above which we want to maximize for this group. For the other group we would need to minimize the joint probability since we want our prediction to be as close to $0$ as possible. Alternatively we can easily transform the probability to $P(y_i = 0)$ which we can then maximize. Since probabilities add up to $1$ and we only have two possible outcomes $P(y_i = 0) = 1 - P(y_i = 1)$. This is convenient because now we can calculate the joint likelihood of all observations and maximize a single function. We assume that the observations are independent from each other and thus the joint likelihood is just the product of the individual probabilities. Thus for the group of $n_1$ individuals with outcome $1$ we have the joint likelihood
+
+$$
+\prod_{i=1}^{n_1} {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}}
+$$
+
+For the second group of $n_2$ individuals with outcome $0$ we get the joint likelihood 
+
+$$
+\prod_{j=1}^{n_{2}} 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}} 
+$$
+
+In order to find the optimal $\beta_i$ we need to combine to two groups into one joint likelihood function for all observations. We can once again do that by multiplying them with each other. However, now we need to add an indicator in order to determine in which group the observation is.
+
+
+$$
+\prod_{k = 1}^{n_1 + n_2} \left({1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}}\right)^{y_i} \times \left( 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}}\right)^{1-y_i}
+$$
+
+The indicators $(\cdot)^{y_i}$ and $(\cdot)^{1-y_i}$ select the appropriate likelihood. To illustrate this consider an individual with outcome $y_j = 1$ 
+
+$$
+\begin{align*}
+&\left({1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}\right)^{y_j} \times \left( 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}\right)^{1-y_j}\\
+=&\left({1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}\right)^{1} \times \left( 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}\right)^{0}\\
+=&{1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}} \times 1\\
+=&{1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}} 
+\end{align*}
+$$
+
+Equivalently for an individual with outcome $y_s = 0$:
+
+$$
+\begin{align*}
+&\left({1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}}\right)^{y_i} \times \left( 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,i} + \beta_2 * x_{2,i} + ... +\beta_m * x_{m,i})}}\right)^{1-y_i}\\
+=&\left({1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}\right)^{0} \times \left( 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}\right)^{1}\\
+=&1\times \left( 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}\right)^{1}\\
+=& 1 - {1 \over 1 + e^{-(\beta_0 + \beta_1 * x_{1,j} + \beta_2 * x_{2,j} + ... +\beta_m * x_{m,j})}}
+\end{align*}
+$$
+
+### Example
+
+Consider an experiment in which we want to find out whether a person will listen to the full song or skip it. Further assume that the genre of the song is the only determining factor of whether somebody is likely to skip it or not. Each individual has rated the genre on a scale from 1 (worst) to 10 (best). Our model looks as follows:
+
+$$ 
+P(\text{skipped}_i) = {1 \over 1 + e^{-(\beta_0 + \beta_1 \text{rating}_i)}}
+$$
+
+The probability that individual $i$ will skip a song is the logisitc function with $X = \beta_0 + \beta_1 * \text{rating}_i$, where $\text{rating}_i$ is individual $i$'s rating of the genre of the song. Since we assume independence of individuals we can write the joint likelihood as
+
+$$
+\prod_{i=1}^{N} \left({1 \over 1 + e^{-(\beta_0 + \beta_1 \text{rating}_i)}}\right)^{y_i} \times \left(1- {1 \over 1 + e^{-(\beta_0 + \beta_1 \text{rating}_i)}}\right)^{(1-y_i)}
+$$
+
+Notice that $y_i$ is either equal to one or to zero. So for each individual only one of the two parts is not equal to one (recall that any real number to the power of 0 is equal to 1). The the part left of the plus sign is "looking at" individuals who skipped the song given their rating and the right part is looking at individuals who did not skip the song given their rating. For the former we want the predicted probability of skipping to be as high as possible. For the latter we want the predicted probability of *not* skipping to be as high as possible and thus write $1 - {1 \over 1+ e^{-(\beta_0 + \beta_1 \text{rating}_i)}}$. This is convenient since we can now maximize a single function. Another way to simplify the calculation and make it computationally feasible is taking the logarithm. This will ensure that extremely small probabilities can still be processed by the computer ([see this illustration](#sum-of-ln-vs-product)).    
+```{r echo = FALSE}
+set.seed(123)
+```
+
+Manually applying this in R would looks as follows. We begin by simulating some data. ```ratingGenre``` is a vector of 10000 randomly generated numbers between 1 and 10. ```pSkip``` will be a vector of probabilites generated by applying the logistic function to our linear model, with the parameters $\beta_0 = 1$ and $\beta_1 = -0.3$.
+
+```{r, message = FALSE, warning = FALSE}
+ratingGenre <- sample(1:10, size = 10000, replace = TRUE)
+linModel <- 1 - 0.3 * ratingGenre
+pSkip <- 1/(1+exp(-linModel))
+```
+
+Now we have to sample whether a user skipped a song or not, based on their probability of skipping. The resulting vector ```skipped``` is composed of 0s and 1s and indicates whether or not a person skipped a song. 
+
+```{r, message = FALSE, warning = FALSE}
+skipped <- 1:length(pSkip)
+for(i in 1:length(pSkip)){
+  skipped[i] <- sample(c(1, 0), size = 1, prob = c(pSkip[i], 1-pSkip[i]))
+}
+```
+
+Our simulated data now looks as follows:
+
+```{r, echo = FALSE, fig.align="center", fig.cap="Percent of songs skipped as a function of the genre rating"}
+freq <- prop.table(table(data.frame(skipped = skipped, rating = ratingGenre)), margin = 2) * 100
+
+freq <- as.data.frame(freq)
+
+colnames(freq) <- c("Skipped", "rating", "Freq")
+
+freq$Skipped <- factor(freq$Skipped, levels = c(0,1), labels = c("No", "Yes"))
+
+ggplot(data = freq, aes(x = rating, y = Freq, fill = Skipped)) +
+geom_col() +
+  ylab("Percent") + 
+  xlab("Genre rating") +
+  theme_bw()
+
+```
+
+The visualization shows that an increase in ```genreRating``` leads to a decrease in the probability of a song being skipped. Now we want to perform maximum likelihood estimation and see how close we get to the true parameter values. To achive this, we need a function that, given a value for $\beta_0$ and $\beta_1$, gives us the value of the log likelihood. The follwing code defines such a function.
+
+```{r, message = FALSE, warning = FALSE}
+mlEstimate <- function(beta_0, beta_1){
+  pred <- 1/(1+exp(-(beta_0 + beta_1 * ratingGenre)))
+  loglik <- skipped * log(pred) + (1-skipped) * log(1 - pred)
+  sum(loglik)
+}
+```
+
+The log likelihood function has the following form.
+
+```{r, echo = FALSE, fig.cap="Plot of the log likelihood function", fig.align="center"}
+library(plotly)
+
+beta_0 <- seq(0, 2, length.out = 100)
+beta_1 <- seq(-0.4, -0.2, length.out = 100)
+opts <- expand.grid(beta_0, beta_1)
+opts$loglik <- apply(opts, 1, function(x) mlEstimate(x[1], x[2]))
+z <- matrix(opts$loglik, ncol = length(beta_0), byrow = TRUE)
+
+plot_ly(x =beta_1, y = beta_0, z = z) %>% 
+  add_surface() %>%
+  layout(scene = list(
+          xaxis = list(title = "beta_1"),
+          yaxis = list(title = "beta_0"),
+          zaxis = list(title = "Log likelihood")
+    ))
+```
+
+As you can see, the maximum of the log likelihood function lies around ```-0.3, 1```, the true parameter values. Now we need to find an algorithm that finds the combination of $\beta_0$ and $\beta_1$ that optimizes this function. There are multiple ways to go about this. The ```glm()``` function uses the built-in optimization function ```optim()```. While we could do the same, we will use a slightly different approach to make the process more intuitive. We are going to employ something called _grid maximization_. Basically, we make a list of all plausible combinations of parameter values and calculate the log likelihood for each combination. Then we simply select the parameter combination that has the highest log likelihood.
+
+```prob_beta_0``` and ```prob_beta_1``` are now vectors that contain 100 plausible values for each parameter.
+```{r, message = FALSE, warning = FALSE}
+prob_beta_0 <- seq(0.5, 1.5, length.out = 100)
+prob_beta_1 <- seq(-1, 0, length.out = 100)
+
+# Print one vector as an example
+prob_beta_0
+```
+
+Next we create a dataframe that contains all possible combinations of ```prob_beta_0``` and ```prob_beta_1```. The ```expand.grid()``` function does exactly that. 
+
+```{r, message = FALSE, warning = FALSE}
+params <- expand.grid(prob_beta_0, prob_beta_1)
+
+# Print df
+params
+```
+
+With the ```apply()``` function we can calculate the log likelihood for each value in the data frame. Note that the ```params``` data frame now has a now column containing the log likelihood.
+
+```{r, message = FALSE, warning = FALSE}
+params$loglik <- apply(params, 1, function(x) mlEstimate(x[1], x[2]))
+
+# print df
+params
+```
+
+Next we simply find the highest log likelihood value and the associated parameter values.
+
+```{r, message = FALSE, warning = FALSE}
+maxLik <- which.max(params$loglik)
+params[maxLik, ]
+```
+
+As you can see, our method comes pretty close to the true parameter values. For comparison, here is the same model calculated with the ```glm()``` function.
+
+
+```{r, message = FALSE, warning = FALSE}
+summary(glm(skipped ~ ratingGenre, family = binomial(link = 'logit')))
+
+```
+
+#### Sum of LN vs Product
+
+To illustrate why the natural log (ln) is important for computations with numbers close to zero (such as joint probabilities), we create a vector of fictitious probabilities and multiply them with each other. As we can see, already a small number of values close to 0 will lead to their product being erroneously interpreted as being 0. If we are only interested in comparing magnitude (as in the case of likelihoods) we can safely apply the ln, since it is a monotonically increasing function and will thus not change the ranking. 
+```{r, message = FALSE, warning = FALSE}
+probs <- c(0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001,
+           0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001,
+           0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001,
+           0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001,
+           0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001,
+           0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001,
+           0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001,
+           0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001, 0.000001)
+prod(probs)
+
+lProbs <- log(probs) # this is the ln
+sum(lProbs)
+
+probs2 <- rbind(probs, probs, probs, probs, probs,
+                probs, probs, probs, probs, probs) # now 10 times as many values
+lProbs2 <- log(probs2)
+sum(lProbs2)
+```
+
